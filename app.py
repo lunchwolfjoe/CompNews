@@ -40,20 +40,15 @@ def initialize_session_state():
         ]
     if 'sources' not in st.session_state:
         st.session_state.sources = ["The Guardian", "Associated Press", "Google News", "Yahoo Finance"]
-    if 'db_session' not in st.session_state:
-        st.session_state.db_session = None
 
 def get_db_session():
-    """Get or create database session"""
-    if st.session_state.db_session is None:
-        st.session_state.db_session = get_db().__enter__()
-    return st.session_state.db_session
+    """Get database session using context manager"""
+    return get_db().__enter__()
 
 def scrape_articles() -> List[Dict]:
     """Scrape articles from all enabled sources"""
     articles = []
     seen_urls = set()
-    db = get_db_session()
     
     try:
         if "The Guardian" in st.session_state.sources:
@@ -73,109 +68,110 @@ def scrape_articles() -> List[Dict]:
             articles.extend(yahoo_scraper.scrape())
             
         # Save new articles to database
-        for article_data in articles:
-            url = article_data['url']
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-            # Check if article already exists in DB
-            existing = db.query(Article).filter(Article.url == url).first()
-            if not existing:
-                # Convert matched_terms to JSON string if it's a list
-                if 'matched_terms' in article_data and isinstance(article_data['matched_terms'], list):
-                    article_data['matched_terms'] = json.dumps(article_data['matched_terms'])
-                
-                # Convert topics to JSON string if it's a list
-                if 'topics' in article_data and isinstance(article_data['topics'], list):
-                    article_data['topics'] = json.dumps(article_data['topics'])
-                
-                # Remove any fields that don't exist in the model
-                model_fields = ['id', 'title', 'content', 'url', 'source', 'published_date', 
-                               'scraped_date', 'author', 'category', 'article_metadata', 
-                               'entities', 'matched_terms', 'relevance_score', 
-                               'topics', 'created_at', 'updated_at']
-                filtered_data = {k: v for k, v in article_data.items() if k in model_fields}
-                
-                # Remove region_match if it exists
-                if 'region_match' in filtered_data:
-                    del filtered_data['region_match']
-                
-                article = Article(**filtered_data)
-                db.add(article)
-        db.commit()
+        with get_db() as db:
+            for article_data in articles:
+                url = article_data['url']
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                # Check if article already exists in DB
+                existing = db.query(Article).filter(Article.url == url).first()
+                if not existing:
+                    # Convert matched_terms to JSON string if it's a list
+                    if 'matched_terms' in article_data and isinstance(article_data['matched_terms'], list):
+                        article_data['matched_terms'] = json.dumps(article_data['matched_terms'])
+                    
+                    # Convert topics to JSON string if it's a list
+                    if 'topics' in article_data and isinstance(article_data['topics'], list):
+                        article_data['topics'] = json.dumps(article_data['topics'])
+                    
+                    # Remove any fields that don't exist in the model
+                    model_fields = ['id', 'title', 'content', 'url', 'source', 'published_date', 
+                                   'scraped_date', 'author', 'category', 'article_metadata', 
+                                   'entities', 'matched_terms', 'relevance_score', 
+                                   'topics', 'created_at', 'updated_at']
+                    filtered_data = {k: v for k, v in article_data.items() if k in model_fields}
+                    
+                    # Remove region_match if it exists
+                    if 'region_match' in filtered_data:
+                        del filtered_data['region_match']
+                    
+                    article = Article(**filtered_data)
+                    db.add(article)
+            db.commit()
         logger.info(f"Saved {len(seen_urls)} new articles to database")
     except Exception as e:
         logger.error(f"Error during scraping: {e}")
         st.error(f"Error during scraping: {str(e)}")
-        db.rollback()
     return articles
 
 def get_articles_from_db(days: int = 7) -> List[Dict]:
     """Get articles from database with filtering"""
-    db = get_db_session()
     try:
         cutoff_date = datetime.now() - timedelta(days=days)
-        query = db.query(Article).filter(Article.published_date >= cutoff_date)
-        logger.info(f"DB filter: published_date >= {cutoff_date}")
         
-        # Apply source filter
-        if st.session_state.sources:
-            query = query.filter(Article.source.in_(st.session_state.sources))
-            logger.info(f"DB filter: sources in {st.session_state.sources}")
+        with get_db() as db:
+            query = db.query(Article).filter(Article.published_date >= cutoff_date)
+            logger.info(f"DB filter: published_date >= {cutoff_date}")
             
-        # Apply relevance score filter
-        min_relevance = 0.1  # Lowered from 0.2 to catch more relevant articles
-        query = query.filter(Article.relevance_score >= min_relevance)
-        logger.info(f"DB filter: relevance_score >= {min_relevance}")
-        
-        # Order by relevance score and date
-        query = query.order_by(Article.relevance_score.desc(), Article.published_date.desc())
-        
-        # Execute query and get all results while session is still active
-        articles = query.all()
-        logger.info(f"DB returned {len(articles)} articles after filtering")
-        
-        # Convert to dicts for display
-        article_dicts = []
-        for article in articles:
-            # Access all SQLAlchemy model attributes while session is active
-            matched_terms = []
-            if article.matched_terms:
-                try:
-                    matched_terms = json.loads(article.matched_terms)
-                except:
-                    matched_terms = []
-                    
-            topics = []
-            if article.topics:
-                try:
-                    topics = json.loads(article.topics)
-                except:
-                    topics = []
-                    
-            article_dict = {
-                'title': str(article.title),
-                'content': str(article.content) if article.content else '',
-                'url': str(article.url),
-                'source': str(article.source),
-                'published_date': article.published_date.strftime('%Y-%m-%d %H:%M:%S') if article.published_date else '',
-                'relevance_score': float(article.relevance_score) if article.relevance_score else 0.0,
-                'matched_terms': matched_terms,
-                'topics': topics
-            }
-            
-            # Add relevance indicator
-            if article_dict['relevance_score'] >= 0.7:
-                article_dict['relevance_indicator'] = '🟢'  # High relevance
-            elif article_dict['relevance_score'] >= 0.4:
-                article_dict['relevance_indicator'] = '🟡'  # Medium relevance
-            else:
-                article_dict['relevance_indicator'] = '🔴'  # Low relevance
+            # Apply source filter
+            if st.session_state.sources:
+                query = query.filter(Article.source.in_(st.session_state.sources))
+                logger.info(f"DB filter: sources in {st.session_state.sources}")
                 
-            article_dicts.append(article_dict)
-        
-        logger.info(f"Returning {len(article_dicts)} article dicts to UI")
-        return article_dicts
+            # Apply relevance score filter
+            min_relevance = 0.1  # Lowered from 0.2 to catch more relevant articles
+            query = query.filter(Article.relevance_score >= min_relevance)
+            logger.info(f"DB filter: relevance_score >= {min_relevance}")
+            
+            # Order by relevance score and date
+            query = query.order_by(Article.relevance_score.desc(), Article.published_date.desc())
+            
+            # Execute query and get all results while session is still active
+            articles = query.all()
+            logger.info(f"DB returned {len(articles)} articles after filtering")
+            
+            # Convert to dicts for display
+            article_dicts = []
+            for article in articles:
+                # Access all SQLAlchemy model attributes while session is active
+                matched_terms = []
+                if article.matched_terms:
+                    try:
+                        matched_terms = json.loads(article.matched_terms)
+                    except:
+                        matched_terms = []
+                        
+                topics = []
+                if article.topics:
+                    try:
+                        topics = json.loads(article.topics)
+                    except:
+                        topics = []
+                        
+                article_dict = {
+                    'title': str(article.title),
+                    'content': str(article.content) if article.content else '',
+                    'url': str(article.url),
+                    'source': str(article.source),
+                    'published_date': article.published_date.strftime('%Y-%m-%d %H:%M:%S') if article.published_date else '',
+                    'relevance_score': float(article.relevance_score) if article.relevance_score else 0.0,
+                    'matched_terms': matched_terms,
+                    'topics': topics
+                }
+                
+                # Add relevance indicator
+                if article_dict['relevance_score'] >= 0.7:
+                    article_dict['relevance_indicator'] = '🟢'  # High relevance
+                elif article_dict['relevance_score'] >= 0.4:
+                    article_dict['relevance_indicator'] = '🟡'  # Medium relevance
+                else:
+                    article_dict['relevance_indicator'] = '🔴'  # Low relevance
+                    
+                article_dicts.append(article_dict)
+            
+            logger.info(f"Returning {len(article_dicts)} article dicts to UI")
+            return article_dicts
         
     except Exception as e:
         logger.error(f"Error fetching articles from database: {e}")
