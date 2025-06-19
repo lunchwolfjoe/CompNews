@@ -1,7 +1,7 @@
 # Web Scraping
-scrapy==2.8.0
+scrapy>=2.5.0
 beautifulsoup4>=4.12.0
-selenium==4.10.0
+selenium>=4.0.0
 requests>=2.31.0
 
 # Database
@@ -17,6 +17,7 @@ celery==5.3.1
 # Frontend
 streamlit>=1.28.0
 elasticsearch==8.9.0
+sqlalchemy>=2.0.0
 
 # Infrastructure
 docker==6.1.3
